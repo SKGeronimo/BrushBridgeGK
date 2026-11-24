@@ -11,15 +11,23 @@
 <div class="shell">
 <header class="top"><div class="brand"><div class="mark">✳</div><div><b>BRUSHBRIDGE</b><small>OPEN SOURCE BRUSH CONVERTER</small></div></div><a href="https://github.com/" class="github" target="_blank" rel="noopener">GitHub ↗</a></header>
 <main>
-<section class="hero"><p class="eyebrow">FREE · LOCAL · EXPERIMENTAL</p><h1>Krita to Photoshop.<br><span>Bridge the brush gap.</span></h1><p class="intro">Extract bitmap brush tips from Krita presets and package them into a legacy ABR file. Your files stay in your browser.</p></section>
+<section class="hero"><p class="eyebrow">FREE · LOCAL · EXPERIMENTAL</p><h1>Krita to Photoshop.<br><span>Bridge the brush gap.</span></h1><p class="intro">Extract bitmap brush tips from Krita presets and package them into a Photoshop-style ABR that Adobe Fresco and Photoshop can import. Your files stay in your browser.</p></section>
 <section class="panel">
-<div id="drop" class="drop" tabindex="0"><div class="upload-icon">↑</div><h2>Drop .KPP brush files here</h2><p>or tap / click to browse · Multiple files supported</p><button id="browse" class="btn secondary">Choose files</button><input id="file" type="file" multiple class="visually-hidden" tabindex="-1" aria-hidden="true"></div>
-<div class="options"><label>Brush spacing <span id="spacingLabel">25%</span><input id="spacing" type="range" min="1" max="100" value="25"></label><label>Output file name<input id="outname" value="converted-brushes.abr"></label></div>
+<div id="drop" class="drop" tabindex="0"><div class="upload-icon">↑</div><h2>Drop .KPP brush files here</h2><p>or tap / click to browse · Multiple files supported<br><small>iPad: in the picker tap <b>Select</b> (top right), then tick every file</small></p><button id="browse" class="btn secondary">Choose files</button><input id="file" type="file" multiple class="visually-hidden" tabindex="-1" aria-hidden="true"></div>
+<div class="options">
+<label>Output<select id="mode"><option value="single">One ABR with all brushes</option><option value="zip">Separate ABR per brush (ZIP)</option></select></label>
+<label>Output file name<input id="outname" value="converted-brushes"></label>
+<label>ABR format<select id="abrversion"><option value="2">Photoshop v6.2 (recommended)</option><option value="1">Photoshop v6.1 (try if 6.2 won't import)</option></select></label>
+<label>Fallback spacing <span id="spacingLabel">25%</span><input id="spacing" type="range" min="1" max="100" value="25"></label>
+<label class="check"><input id="presetspacing" type="checkbox" checked> Use each preset's own spacing when available</label>
+<label class="check"><input id="invert" type="checkbox"> Invert tip data (only if brushes import as inverted blobs)</label>
+<label class="check"><input id="usethumb" type="checkbox"> If no tip is found, use the preset thumbnail (rough)</label>
+</div>
 <div id="list" class="brushlist"></div>
 <div class="bottom"><div id="status" class="status">Select one or more KPP files to begin.</div><button id="convert" class="btn primary" disabled>Convert & download ABR <span>↓</span></button></div>
 </section>
-<section class="note"><strong>Experimental format support</strong><p>KPP presets may use complex brush engines, dynamics, textures, and resources. This tool currently targets sampled bitmap tips only. If a tip cannot be extracted, it may use the KPP preview image as a fallback and mark it clearly. The ABR output is legacy version 1 and may not import in every Photoshop release.</p></section>
-<section class="how"><h2>How it works</h2><div class="steps"><article><div>01</div><h3>Drop presets</h3><p>Choose KPP files directly from your device.</p></article><article><div>02</div><h3>Extract tips</h3><p>Look for embedded bitmap resources and report fallbacks.</p></article><article><div>03</div><h3>Export ABR</h3><p>Package grayscale brush tips into an ABR file.</p></article></div></section>
+<section class="note"><strong>Experimental format support</strong><p>KPP presets may use complex brush engines, dynamics, textures, and resources. This tool currently targets sampled bitmap tips only. If a tip cannot be extracted it is flagged in the list, and you can opt in to using the preset thumbnail instead. The ABR output is Photoshop v6 (tips plus brush presets). Krita’s built-in round and square brushes have no bitmap, so they are approximated with a generated tip.</p></section>
+<section class="how"><h2>How it works</h2><div class="steps"><article><div>01</div><h3>Drop presets</h3><p>Choose KPP files directly from your device.</p></article><article><div>02</div><h3>Extract tips</h3><p>Look for embedded bitmap resources and report fallbacks.</p></article><article><div>03</div><h3>Export ABR</h3><p>Package the tips and presets into a Photoshop-style ABR (or one ABR per brush).</p></article></div></section>
 <footer><span>BrushBridge · Free and open source</span><span>Processing happens locally · No uploads</span></footer>
-</main></div><script src="app.js"></script>
+</main></div><script src="core.js"></script><script src="app.js"></script>
 </body></html>

@@ -44,3 +44,9 @@ Then open http://localhost:8000.
 ## License
 
 MIT — see `LICENSE`.
+
+## Output format
+
+Writes Photoshop ABR v6.1/v6.2: a `samp` section (RLE-compressed 8-bit tips, 255 = ink) and a `desc` section with one sampled-brush preset per tip, which is what Adobe apps use to list brushes. Tips are read from the GIMP `.gbr` (or PNG/SVG) resources Krita embeds in the preset; Krita's built-in round/square brushes are approximated with a generated tip. If brushes look inverted after importing, tick **Invert tip data**. If 6.2 will not import, try 6.1.
+
+`core.js` has no DOM dependencies and can be tested in Node.

@@ -1,27 +1,138 @@
-const $=s=>document.querySelector(s), fileInput=$("#file"), drop=$("#drop"), list=$("#list"), convert=$("#convert"), status=$("#status"), spacing=$("#spacing"), spacingLabel=$("#spacingLabel"), outname=$("#outname");
-let brushes=[];
-$("#browse").onclick=e=>{e.stopPropagation();fileInput.click()};
-drop.onclick=()=>fileInput.click();
-drop.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();fileInput.click()}};
-["dragenter","dragover"].forEach(evt=>drop.addEventListener(evt,e=>{e.preventDefault();drop.classList.add("hover")}));
-["dragleave","drop"].forEach(evt=>drop.addEventListener(evt,e=>{e.preventDefault();drop.classList.remove("hover")}));
-drop.addEventListener("drop",e=>addFiles(e.dataTransfer.files));
-fileInput.onchange=()=>addFiles(fileInput.files);
-spacing.oninput=()=>spacingLabel.textContent=spacing.value+"%";
-function uid(){return (window.crypto&&crypto.randomUUID)?crypto.randomUUID():"b"+Date.now().toString(36)+Math.random().toString(36).slice(2)}
-function addFiles(fileList){const files=Array.from(fileList||[]);let skipped=0;for(const file of files){/* iPadOS can't filter by .kpp, so every file is selectable; non-PNG data is rejected after sniffing */if(!/\.(kpp|png)$/i.test(file.name)&&file.type&&!/png/i.test(file.type)){skipped++;continue}const id=uid();brushes.push({id,file,name:file.name.replace(/\.(kpp|png)$/i,""),image:null,tip:null,xml:"",warning:"Reading preset…"});readKpp(file).then(result=>{const b=brushes.find(x=>x.id===id);if(!b)return;b.image=result.preview;b.tip=result.tip;b.xml=result.xml;b.warning=result.warning;render()}).catch(err=>{const b=brushes.find(x=>x.id===id);if(b){b.warning="Could not parse this file: "+err.message;render()}})}render();if(skipped)status.textContent+=` ${skipped} file(s) skipped (not .kpp or .png).`;fileInput.value=""}
-function render(){list.innerHTML="";brushes.forEach(b=>{const item=document.createElement("div");item.className="brushitem";const img=document.createElement("img");img.className="thumb";img.src=b.image||"";img.alt="Brush preview";const info=document.createElement("div");info.className="binfo";const title=document.createElement("strong");title.textContent=b.name;const small=document.createElement("small");small.textContent=b.tip?"Bitmap tip extracted · "+b.tip.width+"×"+b.tip.height+" px":b.warning||"Processing…";info.append(title,small);const remove=document.createElement("button");remove.className="remove";remove.title="Remove";remove.textContent="×";remove.onclick=()=>{brushes=brushes.filter(x=>x.id!==b.id);render()};item.append(img,info,remove);list.append(item)});convert.disabled=!brushes.some(b=>b.tip);status.textContent=brushes.length?`${brushes.length} file(s) loaded. ${brushes.filter(b=>b.tip).length} tip(s) ready; ${brushes.filter(b=>!b.tip).length} not extractable.`:"Select one or more KPP files to begin."}
-async function readKpp(file){const buf=await file.arrayBuffer();if(file.name.toLowerCase().endsWith(".png")){const preview=await blobUrl(buf);return {preview,tip:await imageToTip(preview),xml:"",warning:"PNG input (image used as brush tip)"}}const parsed=await parsePng(buf);let tip=null,warning="";for(const data of parsed.texts){const candidates=extractImageCandidates(data);for(const candidate of candidates){try{const url=await blobUrl(candidate);const t=await imageToTip(url);if(t&&t.width>1&&t.height>1){tip=t;break}}catch{}}if(tip)break}
-let preview=await blobUrl(buf);
-if(!tip){try{tip=await imageToTip(preview);warning="No embedded tip found. Using the preset thumbnail as a fallback tip."}catch(e){warning="Could not find embedded brush-tip bitmap or decode preview."}}
-return {preview,tip,xml:parsed.texts.join("\n"),warning:warning||"Embedded bitmap tip found"}}
-async function parsePng(buffer){const bytes=new Uint8Array(buffer);if(bytes.length<8||bytes[0]!==137||bytes[1]!==80)throw new Error("Not a PNG file");let pos=8,texts=[];while(pos+8<bytes.length){const len=(bytes[pos]<<24)|(bytes[pos+1]<<16)|(bytes[pos+2]<<8)|bytes[pos+3];const type=String.fromCharCode(...bytes.slice(pos+4,pos+8));const data=bytes.slice(pos+8,pos+8+len);if(type==="tEXt"){const z=data.indexOf(0);texts.push(new TextDecoder().decode(data.slice(z+1)))}if(type==="zTXt"){const z=data.indexOf(0);if(z>=0&&data[z+1]===0){try{texts.push(await inflate(data.slice(z+2)))}catch{}}}if(type==="iTXt"){const z=data.indexOf(0);let p=z+1;if(data[p]===1){p+=2;while(data[p]!==0)p++;p++;try{texts.push(await inflate(data.slice(p)))}catch{}}else{p+=2;while(data[p]!==0)p++;p++;texts.push(new TextDecoder().decode(data.slice(p)))}}pos+=12+len;if(type==="IEND")break}return {texts}}
-async function inflate(data){if(!("DecompressionStream"in window))throw new Error("Compression unsupported");const stream=new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate"));return await new Response(stream).text()}
-function extractImageCandidates(xml){const out=[];const regex=/([A-Za-z0-9+/]{80,}={0,2})/g;let m;while((m=regex.exec(xml))!==null){try{const raw=atob(m[1]);const bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));if(bytes.length>100&&bytes[0]===137&&bytes[1]===80&&bytes[2]===78&&bytes[3]===71)out.push(bytes.buffer)}catch{}}return out}
-async function blobUrl(buffer){return URL.createObjectURL(new Blob([buffer],{type:"image/png"}))}
-async function imageToTip(url){const img=new Image();img.src=url;await img.decode();const canvas=document.createElement("canvas");canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const ctx=canvas.getContext("2d",{willReadFrequently:true});ctx.drawImage(img,0,0);const {data,width,height}=ctx.getImageData(0,0,canvas.width,canvas.height);let pixels=new Uint8Array(width*height);for(let i=0,j=0;i<data.length;i+=4,j++){const alpha=data[i+3];const luminance=(0.2126*data[i]+0.7152*data[i+1]+0.0722*data[i+2]);pixels[j]=Math.round(255-alpha*(1-luminance/255))}return {width,height,pixels}}
-function packBits(data){const out=[];let i=0;while(i<data.length){let run=1;while(i+run<data.length&&data[i+run]===data[i]&&run<128)run++;if(run>=3){out.push((257-run)&255,data[i]);i+=run;continue}let start=i;i+=run;while(i<data.length&&i-start<128){let r=1;while(i+r<data.length&&data[i+r]===data[i]&&r<128)r++;if(r>=3)break;i+=r}const n=i-start;out.push(n-1);for(let k=start;k<i;k++)out.push(data[k])}return new Uint8Array(out)}
-function writeSampledBrush(tip,name,space){const {width:w,height:h,pixels}=tip;const top=0,left=0,bottom=h,right=w;const packed=packBits(pixels);let body=[...u32(0),...u16(space),...u8(1),...i16([top,left,bottom,right]),...i32([top,left,bottom,right]),...u16(8),...u8(0),...pixels];return [...u16(2),...u32(body.length),...body]}
-function u8(v){return [v&255]}function u16(v){return [(v>>8)&255,v&255]}function u32(v){return [(v>>>24)&255,(v>>>16)&255,(v>>>8)&255,v&255]}function i16(arr){return arr.flatMap(v=>u16(v&65535))}function i32(arr){return arr.flatMap(v=>u32(v>>>0))}
-function exportAbr(items,spacingPercent){const eligible=items.filter(b=>b.tip);const space=Math.max(1,Math.min(999,spacingPercent));const chunks=[...u16(1),...u16(eligible.length)];for(const b of eligible)chunks.push(...writeSampledBrush(b.tip,b.name,space));return new Uint8Array(chunks)}
-convert.onclick=()=>{const usable=brushes.filter(b=>b.tip);if(!usable.length)return;try{const bytes=exportAbr(usable,+spacing.value);const blob=new Blob([bytes],{type:"application/octet-stream"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);let name=outname.value.trim()||"converted-brushes.abr";if(!name.toLowerCase().endsWith(".abr"))name+=".abr";a.download=name;a.click();status.textContent=`Exported ${usable.length} brush tip(s). Experimental ABR v1 file—test it in your target app.`}catch(err){status.textContent="Conversion error: "+err.message}};
+/* BrushBridge UI — heavy lifting lives in core.js */
+const $ = s => document.querySelector(s);
+const fileInput = $("#file"), drop = $("#drop"), list = $("#list"), convertBtn = $("#convert"), status = $("#status"),
+  spacing = $("#spacing"), spacingLabel = $("#spacingLabel"), outname = $("#outname"), mode = $("#mode"),
+  abrVersion = $("#abrversion"), invert = $("#invert"), usePresetSpacing = $("#presetspacing"), useThumb = $("#usethumb");
+let brushes = [];
+
+/* ---- file picking (iPadOS can't filter by .kpp, so there is no accept= filter) ---- */
+$("#browse").onclick = e => { e.stopPropagation(); fileInput.value = ""; fileInput.click() };
+drop.onclick = () => { fileInput.value = ""; fileInput.click() };
+drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.value = ""; fileInput.click() } };
+["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover") }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover") }));
+drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
+fileInput.onchange = () => addFiles(fileInput.files);
+spacing.oninput = () => spacingLabel.textContent = spacing.value + "%";
+[mode, abrVersion, invert, usePresetSpacing, useThumb].forEach(el => el.onchange = render);
+
+const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "b" + Date.now().toString(36) + Math.random().toString(36).slice(2);
+
+function addFiles(fileList) {
+  const files = Array.from(fileList || []);
+  for (const file of files) {
+    const id = uid();
+    brushes.push({ id, file, name: file.name.replace(/\.(kpp|png)$/i, ""), preview: null, tip: null, spacing: null, note: "Reading preset…", fallbackTip: null });
+    readFile(file).then(r => Object.assign(brushes.find(b => b.id === id) || {}, r)).catch(err => {
+      const b = brushes.find(x => x.id === id); if (b) b.note = "Could not read this file: " + err.message;
+    }).finally(render);
+  }
+  render();
+}
+
+/* ---- reading ---- */
+async function inflate(data) {
+  if (!("DecompressionStream" in window)) throw new Error("This browser can't decompress PNG text (update iPadOS/Safari)");
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+function loadImage(bytes, mime) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime })), img = new Image();
+    img.onload = () => resolve({ img, url }); img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image decode failed")) }; img.src = url;
+  });
+}
+async function imageBytesToTip(bytes, mime) {
+  const { img, url } = await loadImage(bytes, mime);
+  let w = img.naturalWidth, h = img.naturalHeight; if (!w || !h) { w = h = 512 }
+  const c = document.createElement("canvas"); c.width = w; c.height = h; const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h); URL.revokeObjectURL(url);
+  return { width: w, height: h, ink: BB.rgbaToInk(ctx.getImageData(0, 0, w, h).data, w, h) };
+}
+function inkToDataUrl(tip) {
+  const max = 96, s = Math.min(1, max / Math.max(tip.width, tip.height)), w = Math.max(1, Math.round(tip.width * s)), h = Math.max(1, Math.round(tip.height * s));
+  const src = document.createElement("canvas"); src.width = tip.width; src.height = tip.height;
+  const id = src.getContext("2d").createImageData(tip.width, tip.height);
+  for (let i = 0; i < tip.ink.length; i++) { const v = 255 - tip.ink[i]; id.data[i*4] = id.data[i*4+1] = id.data[i*4+2] = v; id.data[i*4+3] = 255 }
+  src.getContext("2d").putImageData(id, 0, 0);
+  const c = document.createElement("canvas"); c.width = w; c.height = h; const x = c.getContext("2d"); x.imageSmoothingQuality = "high"; x.drawImage(src, 0, 0, w, h);
+  return c.toDataURL();
+}
+async function readFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const texts = await BB.readPngTexts(bytes, inflate);            // throws "Not a PNG file" for other data
+  const xml = texts.join("\n");
+  const thumbUrl = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+  const out = { preview: thumbUrl, fallbackTip: null, tip: null };
+  try { out.fallbackTip = await imageBytesToTip(bytes, "image/png") } catch (e) {}
+
+  if (!/<Preset\b/.test(xml)) {                                    // plain PNG: treat the image itself as the tip
+    out.tip = out.fallbackTip; out.note = out.tip ? "Plain PNG used directly as a tip" : "Could not decode this image"; out.fallbackTip = null;
+    if (out.tip) out.preview = inkToDataUrl(out.tip); return out;
+  }
+  const nm = BB.presetName(xml); if (nm) out.name = nm;
+  const params = BB.brushParams(xml); out.spacing = params.spacing;
+  const res = BB.findResources(xml);
+  for (const r of res) {
+    try {
+      if (r.kind === "gbr") { out.tip = BB.gbrToTip(BB.parseGbr(r.bytes)); out.note = "Embedded GIMP brush tip (.gbr)"; break }
+      if (r.kind === "gih") { out.tip = BB.gbrToTip(BB.parseGih(r.bytes)); out.note = "Embedded animated tip (first frame used)"; break }
+      if (r.kind === "png" || r.kind === "jpeg" || r.kind === "svg") { out.tip = await imageBytesToTip(r.bytes, r.kind === "png" ? "image/png" : r.kind === "jpeg" ? "image/jpeg" : "image/svg+xml"); out.note = "Embedded " + r.kind.toUpperCase() + " tip"; break }
+    } catch (e) { /* try next resource */ }
+  }
+  if (!out.tip && params.auto) { out.tip = BB.autoBrushTip(params.auto); out.note = "Krita built-in round/square brush — approximated as a generated tip" }
+  if (!out.tip) out.note = res.length ? "Embedded resources found but none was a usable brush tip" : "No bitmap tip in this preset (it may reference a brush file that isn't embedded, or use a non-bitmap engine)";
+  if (out.tip) { out.tip = BB.limitSize(out.tip); out.preview = inkToDataUrl(out.tip) }
+  return out;
+}
+
+/* ---- list ---- */
+function usable() { return brushes.filter(b => b.tip || (useThumb.checked && b.fallbackTip)) }
+function tipOf(b) { return b.tip || b.fallbackTip }
+function render() {
+  list.innerHTML = "";
+  brushes.forEach(b => {
+    const item = document.createElement("div"); item.className = "brushitem";
+    const img = document.createElement("img"); img.className = "thumb"; img.alt = ""; if (b.preview) img.src = b.preview;
+    const info = document.createElement("div"); info.className = "binfo";
+    const title = document.createElement("strong"); title.textContent = b.name;
+    const small = document.createElement("small");
+    const t = tipOf(b);
+    small.textContent = b.tip ? `${b.note} · ${b.tip.width}×${b.tip.height}px` : (t ? "No tip found — will use the preset thumbnail (rough)" : b.note);
+    info.append(title, small);
+    const remove = document.createElement("button"); remove.className = "remove"; remove.title = "Remove"; remove.textContent = "×";
+    remove.onclick = () => { brushes = brushes.filter(x => x.id !== b.id); render() };
+    item.append(img, info, remove); list.append(item);
+  });
+  const n = usable().length;
+  convertBtn.disabled = n === 0;
+  convertBtn.firstChild.textContent = mode.value === "zip" ? "Convert & download ZIP " : "Convert & download ABR ";
+  status.textContent = brushes.length ? `${brushes.length} file(s) loaded · ${n} ready to export · ${brushes.length - n} without a usable tip.` : "Select one or more KPP files to begin.";
+}
+
+/* ---- export ---- */
+function entryFor(b) {
+  const t = tipOf(b);
+  return { name: b.name, width: t.width, height: t.height, ink: t.ink, spacing: usePresetSpacing.checked && b.spacing ? b.spacing : +spacing.value };
+}
+function download(bytes, filename, type) {
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([bytes], { type })); a.download = filename; document.body.append(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove() }, 4000);
+}
+const safe = s => s.replace(/[\\/:*?"<>|]+/g, "_").trim() || "brush";
+convertBtn.onclick = () => {
+  const items = usable(); if (!items.length) return;
+  const opts = { sub: +abrVersion.value, invert: invert.checked };
+  try {
+    let base = outname.value.trim().replace(/\.(abr|zip)$/i, "") || "converted-brushes";
+    if (mode.value === "zip") {
+      const used = new Set(), files = items.map(b => { let n = safe(b.name), k = 2, cand = n; while (used.has(cand.toLowerCase())) cand = n + " " + k++; used.add(cand.toLowerCase()); return { name: cand + ".abr", data: BB.buildAbr([entryFor(b)], opts) } });
+      download(BB.zip(files), base + ".zip", "application/zip");
+      status.textContent = `Exported ${files.length} separate ABR file(s) in a ZIP.`;
+    } else {
+      download(BB.buildAbr(items.map(entryFor), opts), base + ".abr", "application/octet-stream");
+      status.textContent = `Exported ${items.length} brush(es) into one ABR (Photoshop v6.${opts.sub}).`;
+    }
+  } catch (err) { status.textContent = "Conversion error: " + err.message }
+};
+render();
