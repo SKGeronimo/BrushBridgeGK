@@ -101,16 +101,22 @@ BB.limitSize = function (tip, max = 2500) {
 const unescapeXml = s => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
 BB.presetName = xml => { const m = /<Preset\b[^>]*?\sname="([^"]*)"/.exec(xml); return m ? unescapeXml(m[1]) : null };
 BB.brushParams = function (xml) {
-  const x = unescapeXml(unescapeXml(xml)); // brush_definition is XML nested inside an XML attribute/CDATA
-  const out = { spacing: null, auto: null };
+  const out = { spacing: null, scale: 1, type: null, filename: null, auto: null };
+  // only the top-level param named exactly "brush_definition" (the masking brush has its own, prefixed one)
+  const pm = /<param\b[^>]*\bname="brush_definition"[^>]*>([\s\S]*?)<\/param>/.exec(xml);
+  const x = pm ? unescapeXml(pm[1].replace(/<!\[CDATA\[|\]\]>/g, "")) : "";
   const bt = /<Brush\b[^>]*>/.exec(x);
+  const attrOf = (tag, n) => { const m = new RegExp("\\b" + n + '="([^"]*)"').exec(tag); return m ? m[1] : null };
   if (bt) {
-    const sp = /\bspacing="([\d.eE+-]+)"/.exec(bt[0]); if (sp && isFinite(+sp[1])) out.spacing = Math.max(1, Math.min(999, Math.round(+sp[1] * 100)));
-    if (/type="auto_brush"/.test(bt[0])) {
-      const mg = /<MaskGenerator\b[^>]*>/.exec(x); const attr = (n, d) => { const m = mg && new RegExp("\\b" + n + '="([^"]*)"').exec(mg[0]); return m && isFinite(+m[1]) ? +m[1] : d };
-      out.auto = { shape: mg && /type="rect"/.test(mg[0]) ? "rect" : "circle", ratio: attr("ratio", 1), hfade: attr("hfade", 0.5), vfade: attr("vfade", 0.5) };
+    out.type = attrOf(bt[0], "type"); out.filename = attrOf(bt[0], "filename");
+    const sp = +attrOf(bt[0], "spacing"); if (isFinite(sp) && sp > 0) out.spacing = Math.max(1, Math.min(999, Math.round(sp * 100)));
+    const sc = +attrOf(bt[0], "scale"); if (isFinite(sc) && sc > 0) out.scale = sc;
+    if (out.type === "auto_brush") {
+      const mg = /<MaskGenerator\b[^>]*>/.exec(x); const num = (n, d) => { const v = mg ? +attrOf(mg[0], n) : NaN; return isFinite(v) ? v : d };
+      out.auto = { shape: mg && attrOf(mg[0], "type") === "rect" ? "rect" : "circle", ratio: num("ratio", 1), hfade: num("hfade", 0.5), vfade: num("vfade", 0.5) };
     }
   }
+  if (!out.filename) { const rf = /<param\b[^>]*\bname="requiredBrushFile"[^>]*>([\s\S]*?)<\/param>/.exec(xml); if (rf) out.filename = rf[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim() || null }
   return out;
 };
 /* Krita's built-in round/square "auto" brushes have no bitmap, so draw an equivalent soft tip */
@@ -150,6 +156,24 @@ BB.findResources = function (xml) {
   }
   found.sort((a, b) => (b.type === "brushes") - (a.type === "brushes")); // brush tips before textures/patterns
   return found;
+};
+
+
+/* ---------- read a ZIP (.bundle / .zip) ---------- */
+BB.readZip = async function (b, inflateRaw) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength); let e = -1;
+  for (let i = b.length - 22; i >= Math.max(0, b.length - 70000); i--) if (dv.getUint32(i, true) === 0x06054b50) { e = i; break }
+  if (e < 0) throw new Error("Not a ZIP file");
+  const count = dv.getUint16(e + 10, true); let p = dv.getUint32(e + 16, true); const out = [];
+  for (let n = 0; n < count; n++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true), el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), off = dv.getUint32(p + 42, true);
+    const name = utf8(b.subarray(p + 46, p + 46 + nl)); p += 46 + nl + el + cl;
+    if (name.endsWith("/")) continue;
+    const lnl = dv.getUint16(off + 26, true), lel = dv.getUint16(off + 28, true), start = off + 30 + lnl + lel, raw = b.subarray(start, start + csize);
+    try { out.push({ name, data: method === 0 ? raw : method === 8 ? await inflateRaw(raw) : null }) } catch (err) { out.push({ name, data: null }) }
+  }
+  return out.filter(f => f.data);
 };
 
 /* ---------- ABR v6 writer ---------- */

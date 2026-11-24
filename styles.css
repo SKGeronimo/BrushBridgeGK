@@ -5,3 +5,4 @@
 .options .check{display:flex;flex-direction:row;gap:.6rem;align-items:flex-start;grid-column:1/-1}
 .options .check input{width:auto;margin-top:.2rem;flex:none;padding:0;border:0}
 .drop small{opacity:.7}
+.brushitem.warn{border-color:#8a6b2f;background:#2a2418}.brushitem.warn small{color:#ecd08a}
