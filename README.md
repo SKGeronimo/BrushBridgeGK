@@ -19,6 +19,10 @@ ABR v1 sampled-brush serialization is experimental. Compatibility has not been v
 
 Please test the generated ABR in a disposable brush set before relying on it. Contributions and sample-file-based format validation are welcome.
 
+## iPad / iPhone note
+
+iOS and iPadOS do not know the `.kpp` file type, so the file picker intentionally has no type filter (otherwise `.kpp` files appear greyed out). Any file can be chosen; non-PNG data is reported as unreadable.
+
 ## Run
 
 Open `index.html` in a modern browser. For best results use a local static server (optional), e.g.:

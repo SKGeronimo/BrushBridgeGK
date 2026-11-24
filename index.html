@@ -13,7 +13,7 @@
 <main>
 <section class="hero"><p class="eyebrow">FREE · LOCAL · EXPERIMENTAL</p><h1>Krita to Photoshop.<br><span>Bridge the brush gap.</span></h1><p class="intro">Extract bitmap brush tips from Krita presets and package them into a legacy ABR file. Your files stay in your browser.</p></section>
 <section class="panel">
-<div id="drop" class="drop" tabindex="0"><div class="upload-icon">↑</div><h2>Drop .KPP brush files here</h2><p>or click to browse · Multiple files supported</p><button id="browse" class="btn secondary">Choose files</button><input id="file" type="file" accept=".kpp,.png" multiple hidden></div>
+<div id="drop" class="drop" tabindex="0"><div class="upload-icon">↑</div><h2>Drop .KPP brush files here</h2><p>or tap / click to browse · Multiple files supported</p><button id="browse" class="btn secondary">Choose files</button><input id="file" type="file" multiple class="visually-hidden" tabindex="-1" aria-hidden="true"></div>
 <div class="options"><label>Brush spacing <span id="spacingLabel">25%</span><input id="spacing" type="range" min="1" max="100" value="25"></label><label>Output file name<input id="outname" value="converted-brushes.abr"></label></div>
 <div id="list" class="brushlist"></div>
 <div class="bottom"><div id="status" class="status">Select one or more KPP files to begin.</div><button id="convert" class="btn primary" disabled>Convert & download ABR <span>↓</span></button></div>
