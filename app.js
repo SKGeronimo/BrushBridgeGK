@@ -1,174 +1,380 @@
-/* BrushBridge UI — heavy lifting lives in core.js */
-const $ = s => document.querySelector(s);
-const fileInput = $("#file"), drop = $("#drop"), list = $("#list"), convertBtn = $("#convert"), status = $("#status"),
-  spacing = $("#spacing"), spacingLabel = $("#spacingLabel"), outname = $("#outname"), mode = $("#mode"),
-  abrVersion = $("#abrversion"), maxTip = $("#maxtip"), variantsBtn = $("#variants"), invert = $("#invert"), usePresetSpacing = $("#presetspacing"), useThumb = $("#usethumb");
-/* item kinds: "preset" (.kpp), "tip" (.gbr/.png/.svg tip file), each with .tip once decoded */
-let items = [];
+// KPP → ABR converter. Runs entirely in the browser. Requires pako (CDN).
 
-/* ---- file picking (iPadOS can't filter by .kpp/.gbr, so there is no accept= filter) ---- */
-const pick = () => { fileInput.value = ""; fileInput.click() };
-$("#browse").onclick = e => { e.stopPropagation(); pick() };
-drop.onclick = pick;
-drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick() } };
-["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hover") }));
-["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("hover") }));
-drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
-fileInput.onchange = () => addFiles(fileInput.files);
-spacing.oninput = () => { spacingLabel.textContent = spacing.value + "%" };
-[mode, abrVersion, maxTip, invert, usePresetSpacing, useThumb].forEach(el => el.onchange = render);
+const state = { brushes: [] };
 
-const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "b" + Date.now().toString(36) + Math.random().toString(36).slice(2);
-const baseName = n => n.replace(/^.*[\\/]/, "");
-const normKey = n => baseName(n).toLowerCase().replace(/\s*\(\d+\)(?=\.[^.]+$)/, "");   // "tip (1).gbr" -> "tip.gbr"
+// ---------- PNG chunk parsing ----------
 
-/* ---- browser helpers ---- */
-async function inflateWith(format, data) {
-  if (!("DecompressionStream" in window)) throw new Error("This browser can't decompress data (update iPadOS/Safari)");
-  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream(format));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-const inflate = d => inflateWith("deflate", d), inflateRaw = d => inflateWith("deflate-raw", d);
-function loadImage(bytes, mime) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(new Blob([bytes], { type: mime })), img = new Image();
-    img.onload = () => resolve({ img, url }); img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image decode failed")) }; img.src = url;
-  });
-}
-async function imageBytesToTip(bytes, mime) {
-  const { img, url } = await loadImage(bytes, mime);
-  let w = img.naturalWidth, h = img.naturalHeight; if (!w || !h) w = h = 512;
-  const c = document.createElement("canvas"); c.width = w; c.height = h; const ctx = c.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0, w, h); URL.revokeObjectURL(url);
-  return { width: w, height: h, ink: BB.rgbaToInk(ctx.getImageData(0, 0, w, h).data, w, h) };
-}
-function inkToDataUrl(tip) {
-  const max = 96, s = Math.min(1, max / Math.max(tip.width, tip.height)), w = Math.max(1, Math.round(tip.width * s)), h = Math.max(1, Math.round(tip.height * s));
-  const src = document.createElement("canvas"); src.width = tip.width; src.height = tip.height;
-  const sx = src.getContext("2d"), id = sx.createImageData(tip.width, tip.height);
-  for (let i = 0; i < tip.ink.length; i++) { const v = 255 - tip.ink[i]; id.data[i*4] = id.data[i*4+1] = id.data[i*4+2] = v; id.data[i*4+3] = 255 }
-  sx.putImageData(id, 0, 0);
-  const c = document.createElement("canvas"); c.width = w; c.height = h; const x = c.getContext("2d"); x.imageSmoothingQuality = "high"; x.drawImage(src, 0, 0, w, h);
-  return c.toDataURL();
-}
-const isPng = b => b.length > 8 && b[0] === 137 && b[1] === 80 && b[2] === 78 && b[3] === 71;
-const isZip = b => b.length > 4 && b[0] === 0x50 && b[1] === 0x4b && (b[2] === 3 || b[2] === 5);
-
-/* ---- adding files ---- */
-function addFiles(fileList) {
-  for (const file of Array.from(fileList || [])) {
-    const id = uid(), item = { id, file, kind: "pending", name: file.name.replace(/\.[^.]+$/, ""), key: normKey(file.name), preview: null, tip: null, note: "Reading…" };
-    items.push(item);
-    readFile(item).catch(err => { item.kind = "error"; item.note = "Could not read this file: " + err.message }).finally(render);
+function parsePngChunks(buffer) {
+  const view = new DataView(buffer);
+  const sig = new Uint8Array(buffer, 0, 8);
+  const pngSig = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  for (let i = 0; i < 8; i++) {
+    if (sig[i] !== pngSig[i]) throw new Error('Not a valid PNG file');
   }
-  render();
-}
-async function readFile(item) {
-  const bytes = new Uint8Array(await item.file.arrayBuffer());
-  if (isZip(bytes)) return readBundle(item, bytes);
-  const gbr = !isPng(bytes) && (BB.parseGbr(bytes) || BB.parseGih(bytes));
-  if (gbr) { item.kind = "tip"; item.name = gbr.name || item.name; item.tip = BB.limitSize(BB.gbrToTip(gbr)); item.preview = inkToDataUrl(item.tip); item.spacing = gbr.spacing || null; item.note = "Brush tip file (.gbr)"; return }
-  if (/\.svg$/i.test(item.file.name) || /^\s*(<\?xml|<svg)/.test(new TextDecoder("latin1").decode(bytes.subarray(0, 100)))) { item.kind = "tip"; item.tip = BB.limitSize(await imageBytesToTip(bytes, "image/svg+xml")); item.preview = inkToDataUrl(item.tip); item.note = "Brush tip file (SVG)"; return }
-  const texts = await BB.readPngTexts(bytes, inflate);           // throws "Not a PNG file" for anything else
-  const xml = texts.join("\n");
-  const thumbUrl = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
-  if (!/<Preset\b/.test(xml)) {                                  // plain PNG: the image itself is a tip
-    item.kind = "tip"; item.tip = BB.limitSize(await imageBytesToTip(bytes, "image/png")); item.preview = inkToDataUrl(item.tip); item.note = "Brush tip image (PNG)"; return;
+  const chunks = [];
+  let offset = 8;
+  while (offset + 8 <= buffer.byteLength) {
+    const length = view.getUint32(offset);
+    const type = String.fromCharCode(
+      view.getUint8(offset + 4), view.getUint8(offset + 5),
+      view.getUint8(offset + 6), view.getUint8(offset + 7)
+    );
+    if (offset + 12 + length > buffer.byteLength) break;
+    chunks.push({ type, data: new Uint8Array(buffer, offset + 8, length) });
+    offset += 12 + length;
+    if (type === 'IEND') break;
   }
-  item.kind = "preset"; item.preview = thumbUrl; item.name = BB.presetName(xml) || item.name;
-  item.ref = BB.brushParams(xml);
-  try { item.fallbackTip = await imageBytesToTip(bytes, "image/png") } catch (e) {}
-  for (const r of BB.findResources(xml)) {                       // tips some Krita versions embed directly
+  return chunks;
+}
+
+function stripBom(s) {
+  return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+}
+
+function extractXml(chunks) {
+  for (const chunk of chunks) {
     try {
-      if (r.kind === "gbr" || r.kind === "gih") { const g = r.kind === "gbr" ? BB.parseGbr(r.bytes) : BB.parseGih(r.bytes); item.embedded = BB.limitSize(BB.gbrToTip(g)); item.embeddedNote = "Embedded brush tip"; break }
-      if (r.kind === "png" || r.kind === "jpeg" || r.kind === "svg") { item.embedded = BB.limitSize(await imageBytesToTip(r.bytes, r.kind === "png" ? "image/png" : r.kind === "jpeg" ? "image/jpeg" : "image/svg+xml")); item.embeddedNote = "Embedded " + r.kind.toUpperCase() + " tip"; break }
-    } catch (e) { /* try next */ }
+      if (chunk.type === 'tEXt') {
+        const n = chunk.data.indexOf(0);
+        if (n < 0) continue;
+        const text = new TextDecoder().decode(chunk.data.slice(n + 1));
+        if (text.includes('preset') || text.includes('<param')) return stripBom(text);
+      } else if (chunk.type === 'zTXt') {
+        const n = chunk.data.indexOf(0);
+        if (n < 0) continue;
+        const inflated = pako.inflate(chunk.data.slice(n + 2));
+        const text = new TextDecoder().decode(inflated);
+        if (text.includes('preset') || text.includes('<param')) return stripBom(text);
+      } else if (chunk.type === 'iTXt') {
+        const n = chunk.data.indexOf(0);
+        if (n < 0) continue;
+        const flag = chunk.data[n + 1];
+        let pos = n + 3;
+        const langEnd = chunk.data.indexOf(0, pos);
+        if (langEnd < 0) continue;
+        pos = langEnd + 1;
+        const transEnd = chunk.data.indexOf(0, pos);
+        if (transEnd < 0) continue;
+        pos = transEnd + 1;
+        let text;
+        if (flag === 1) {
+          text = new TextDecoder().decode(pako.inflate(chunk.data.slice(pos)));
+        } else {
+          text = new TextDecoder().decode(chunk.data.slice(pos));
+        }
+        if (text.includes('preset') || text.includes('<param')) return stripBom(text);
+      }
+    } catch (e) { /* skip bad chunk */ }
   }
-}
-async function readBundle(item, bytes) {                        // Krita .bundle / .zip: take presets and tips, skip patterns/gradients
-  const files = await BB.readZip(bytes, inflateRaw);
-  const wanted = files.filter(f => /\.(kpp|gbr|gih|svg|png)$/i.test(f.name) && !/(^|\/)(patterns|gradients|palettes|gamutmasks|workspaces|symbols)\//i.test(f.name));
-  item.kind = "bundle"; item.note = `Bundle: unpacked ${wanted.length} file(s)`;
-  for (const f of wanted) {
-    const file = new File([f.data], baseName(f.name)), id = uid(), sub = { id, file, kind: "pending", name: baseName(f.name).replace(/\.[^.]+$/, ""), key: normKey(f.name), preview: null, tip: null, note: "Reading…" };
-    items.push(sub); readFile(sub).catch(err => { sub.kind = "error"; sub.note = "Could not read: " + err.message }).finally(render);
-  }
+  return null;
 }
 
-/* ---- resolving presets against available tip files ---- */
-function resolve() {
-  const tips = new Map(); items.filter(i => i.kind === "tip" && i.tip).forEach(i => { i.usedBy = 0; tips.set(i.key, i) });
-  for (const b of items) {
-    if (b.kind !== "preset") continue;
-    b.tip = null; b.needs = null; const ref = b.ref || {};
-    if (b.embedded) { b.tip = b.embedded; b.note = b.embeddedNote; continue }
-    const hit = ref.filename && tips.get(normKey(ref.filename));
-    if (hit) { b.tip = hit.tip; hit.usedBy++; b.note = "Tip from " + baseName(ref.filename); continue }
-    if (ref.auto) { b.tip = BB.autoBrushTip(ref.auto); b.note = "Krita built-in round/square brush — approximated as a generated tip"; continue }
-    if (ref.filename) { b.needs = baseName(ref.filename); b.note = `Needs the brush tip file “${b.needs}” (not stored inside the preset). Add it, or its .bundle, to this list.` }
-    else b.note = "No bitmap tip in this preset (non-bitmap brush engine?)";
-  }
-}
-const tipOf = b => b.tip || (useThumb.checked && b.fallbackTip) || null;
-function exportable() { return items.filter(b => (b.kind === "preset" && tipOf(b)) || (b.kind === "tip" && b.tip && !b.usedBy)) }
+// ---------- XML settings ----------
 
-function render() {
-  resolve(); list.innerHTML = "";
-  items.filter(b => b.kind !== "bundle").forEach(b => {
-    const row = document.createElement("div"); row.className = "brushitem" + (b.needs ? " warn" : "");
-    const img = document.createElement("img"); img.className = "thumb"; img.alt = ""; if (b.preview) img.src = b.preview;
-    const info = document.createElement("div"); info.className = "binfo";
-    const title = document.createElement("strong"); title.textContent = b.name;
-    const small = document.createElement("small"), t = tipOf(b);
-    let text = b.note || "";
-    if (b.kind === "preset" && b.tip) text += ` · ${b.tip.width}×${b.tip.height}px`;
-    else if (b.kind === "preset" && t) text = "No tip available — will use the preset thumbnail (rough)";
-    else if (b.kind === "tip") text += b.usedBy ? ` · used by ${b.usedBy} preset(s), exported with them` : ` · ${b.tip.width}×${b.tip.height}px · will be exported as its own brush`;
-    small.textContent = text; info.append(title, small);
-    const remove = document.createElement("button"); remove.className = "remove"; remove.title = "Remove"; remove.textContent = "×";
-    remove.onclick = () => { items = items.filter(x => x.id !== b.id); render() };
-    row.append(img, info, remove); list.append(row);
+function parseXmlSettings(xmlString) {
+  const cleaned = xmlString.replace(/<!DOCTYPE[^>]*>/i, '');
+  const doc = new DOMParser().parseFromString(cleaned, 'application/xml');
+  const preset = doc.querySelector('preset, Preset, paintoppreset');
+
+  const params = {};
+  doc.querySelectorAll('param').forEach(p => {
+    const n = p.getAttribute('name');
+    if (n) params[n] = p.textContent;
   });
-  const n = exportable().length, missing = [...new Set(items.filter(b => b.needs).map(b => b.needs))];
-  convertBtn.disabled = n === 0; variantsBtn.disabled = n === 0;
-  convertBtn.firstChild.textContent = mode.value === "zip" ? "Convert & download ZIP " : "Convert & download ABR ";
-  status.textContent = !items.length ? "Select one or more KPP files to begin." :
-    `${n} brush(es) ready to export.` + (missing.length ? ` Missing tip file(s): ${missing.join(", ")} — add them alongside the presets.` : "");
+
+  const pick = (...keys) => {
+    for (const k of keys) if (params[k] != null && !isNaN(parseFloat(params[k]))) return parseFloat(params[k]);
+    return null;
+  };
+
+  return {
+    name: preset?.getAttribute('name') || null,
+    size: pick('brush_size', 'size', 'diameter'),
+    spacing: pick('spacing', 'brush_spacing'),
+  };
 }
 
-/* ---- export ---- */
-function entryFor(b) {
-  const t = tipOf(b), sp = (b.kind === "preset" ? b.ref && b.ref.spacing : b.spacing) || null;
-  return { name: b.name, width: t.width, height: t.height, ink: t.ink, spacing: usePresetSpacing.checked && sp ? sp : +spacing.value };
+// ---------- Brush tip extraction ----------
+
+async function loadPngAsImage(buffer) {
+  const url = URL.createObjectURL(new Blob([buffer], { type: 'image/png' }));
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error('Failed to decode PNG'));
+    img.src = url;
+  });
+  return img;
 }
-function download(bytes, filename, type) {
-  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([bytes], { type })); a.download = filename; document.body.append(a); a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove() }, 4000);
-}
-const safe = s => s.replace(/[\\/:*?"<>|]+/g, "_").trim() || "brush";
-convertBtn.onclick = () => {
-  const list_ = exportable(); if (!list_.length) return;
-  const [major, sub] = abrVersion.value.split(".").map(Number), opts = { major, sub, full: true, maxTip: +maxTip.value, invert: invert.checked };
-  try {
-    const base = outname.value.trim().replace(/\.(abr|zip)$/i, "") || "converted-brushes";
-    if (mode.value === "zip") {
-      const used = new Set(), files = list_.map(b => { const n = safe(b.name); let k = 2, cand = n; while (used.has(cand.toLowerCase())) cand = n + " " + k++; used.add(cand.toLowerCase()); return { name: cand + ".abr", data: BB.buildAbr([entryFor(b)], opts) } });
-      download(BB.zip(files), base + ".zip", "application/zip"); status.textContent = `Exported ${files.length} separate ABR file(s) in a ZIP.`;
+
+function imageToTipData(img) {
+  const width = img.naturalWidth;
+  const height = img.naturalHeight;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+
+  const total = width * height;
+  let aMin = 255, aMax = 0;
+  for (let i = 0; i < total; i++) {
+    const a = pixels[i * 4 + 3];
+    if (a < aMin) aMin = a;
+    if (a > aMax) aMax = a;
+  }
+  const useAlpha = (aMax - aMin) > 4;
+
+  const tip = new Uint8Array(total);
+  for (let i = 0; i < total; i++) {
+    if (useAlpha) {
+      tip[i] = pixels[i * 4 + 3];
     } else {
-      download(BB.buildAbr(list_.map(entryFor), opts), base + ".abr", "application/octet-stream"); status.textContent = `Exported ${list_.length} brush(es) into one ABR (Photoshop v${major}.${sub}).`;
+      const r = pixels[i * 4], g = pixels[i * 4 + 1], b = pixels[i * 4 + 2];
+      tip[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
     }
-  } catch (err) { status.textContent = "Conversion error: " + err.message }
-};
-render();
+  }
+  return { tip, width, height };
+}
 
-/* ---- Fresco compatibility test files: same brushes, five different ABR builds ---- */
-variantsBtn.onclick = () => {
-  const few = exportable().slice(0, 3); if (!few.length) return;
-  const base = { maxTip: 512, invert: invert.checked }, entries = few.map(entryFor);
-  const builds = [["1_v10.2_full", { major: 10, sub: 2, full: true }], ["2_v10.2_minimal", { major: 10, sub: 2, full: false }], ["3_v10.1_full", { major: 10, sub: 1, full: true }], ["4_v6.2_full", { major: 6, sub: 2, full: true }], ["5_v6.2_minimal", { major: 6, sub: 2, full: false }]];
+function padToSquare(tip, width, height) {
+  const size = Math.max(width, height);
+  if (width === height) return { tip, size };
+  const out = new Uint8Array(size * size);
+  const offX = Math.floor((size - width) / 2);
+  const offY = Math.floor((size - height) / 2);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      out[(y + offY) * size + (x + offX)] = tip[y * width + x];
+    }
+  }
+  return { tip: out, size };
+}
+
+function downsample(tip, size, maxSize) {
+  if (size <= maxSize) return { tip, size };
+  const out = new Uint8Array(maxSize * maxSize);
+  const scale = size / maxSize;
+  for (let y = 0; y < maxSize; y++) {
+    for (let x = 0; x < maxSize; x++) {
+      out[y * maxSize + x] = tip[Math.floor(y * scale) * size + Math.floor(x * scale)];
+    }
+  }
+  return { tip: out, size: maxSize };
+}
+
+function makeThumbnail(img) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 48; canvas.height = 48;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, 48, 48);
+  ctx.drawImage(img, 0, 0, 48, 48);
+  return canvas.toDataURL();
+}
+
+async function processKppFile(file) {
+  const buffer = await file.arrayBuffer();
+  const chunks = parsePngChunks(buffer);
+  const xml = extractXml(chunks);
+
+  let settings = { name: file.name.replace(/\.kpp$/i, ''), size: null, spacing: null };
+  if (xml) {
+    try {
+      const parsed = parseXmlSettings(xml);
+      if (parsed.name) settings.name = parsed.name;
+      if (parsed.size != null) settings.size = parsed.size;
+      if (parsed.spacing != null) settings.spacing = parsed.spacing;
+    } catch (e) { console.warn('XML parse failed:', e); }
+  }
+
+  const img = await loadPngAsImage(buffer);
+  const { tip, width, height } = imageToTipData(img);
+  const square = padToSquare(tip, width, height);
+  const { tip: finalTip, size: finalSize } = downsample(square.tip, square.size, 2500);
+
+  let spacingPct = 25;
+  if (settings.spacing != null && !isNaN(settings.spacing)) {
+    spacingPct = settings.spacing < 10
+      ? Math.round(settings.spacing * 100)
+      : Math.round(settings.spacing);
+  }
+  spacingPct = Math.max(1, Math.min(1000, spacingPct));
+
+  return {
+    name: settings.name || file.name.replace(/\.kpp$/i, ''),
+    width: finalSize,
+    height: finalSize,
+    tipData: finalTip,
+    spacing: spacingPct,
+    thumbnail: makeThumbnail(img),
+    sourceFile: file.name,
+  };
+}
+
+// ---------- ABR writer (v2, sampled brush) ----------
+
+function buildAbr(brushes) {
+  const encoder = new TextEncoder();
+
+  const prepared = brushes.map((brush) => {
+    const clean = (brush.name || 'Brush').replace(/[\x00-\x1F\x7F]/g, '').substring(0, 255);
+    const bytes = encoder.encode(clean);
+    const len = bytes.length;
+    const pad = (4 - ((len + 1) % 4)) % 4;
+    return { brush, nameBytes: bytes, nameLen: len, namePad: pad };
+  });
+
+  let total = 2 + 2 + 4;
+  for (const p of prepared) {
+    total += 4 + 4 + 4;                  // type, size, spacing
+    total += 1 + p.nameLen + p.namePad;  // pascal name
+    total += 4;                          // antialiasing
+    total += 4 + 4 + 4 + 4;              // top, left, bottom, right
+    total += 4;                          // depth (bits per pixel)
+    total += 1;                          // compression
+    total += p.brush.tipData.length;     // tip bytes
+  }
+
+  const buffer = new ArrayBuffer(total);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  let o = 0;
+
+  view.setUint16(o, 2, false); o += 2;           // version
+  view.setUint16(o, 2, false); o += 2;           // subversion
+  view.setUint32(o, prepared.length, false); o += 4;
+
+  for (const p of prepared) {
+    const b = p.brush;
+    view.setUint32(o, 2, false); o += 4;         // sampled brush
+    view.setUint32(o, b.width, false); o += 4;   // size
+    view.setUint32(o, b.spacing, false); o += 4; // spacing (percent)
+
+    view.setUint8(o, p.nameLen); o += 1;
+    bytes.set(p.nameBytes, o); o += p.nameLen;
+    o += p.namePad;
+
+    view.setUint32(o, 1, false); o += 4;         // antialiasing
+
+    view.setInt32(o, 0, false); o += 4;          // top
+    view.setInt32(o, 0, false); o += 4;          // left
+    view.setInt32(o, b.height, false); o += 4;   // bottom (exclusive)
+    view.setInt32(o, b.width, false); o += 4;    // right  (exclusive)
+
+    view.setUint32(o, 8, false); o += 4;         // depth = 8 bits/pixel
+    view.setUint8(o, 0); o += 1;                 // compression = raw
+
+    bytes.set(b.tipData, o); o += b.tipData.length;
+  }
+
+  return new Blob([buffer], { type: 'application/octet-stream' });
+}
+
+// ---------- UI ----------
+
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const browseBtn = document.getElementById('browse-btn');
+const outputSection = document.getElementById('output-section');
+const brushList = document.getElementById('brush-list');
+const downloadBtn = document.getElementById('download-btn');
+const statusEl = document.getElementById('status');
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.classList.toggle('error', isError);
+}
+
+browseBtn.addEventListener('click', e => { e.stopPropagation(); fileInput.click(); });
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', async e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const files = Array.from(e.dataTransfer.files);
+  if (files.length) await handleFiles(files);
+});
+fileInput.addEventListener('change', async e => {
+  const files = Array.from(e.target.files);
+  if (files.length) await handleFiles(files);
+  fileInput.value = '';
+});
+
+async function handleFiles(files) {
+  const valid = files.filter(f => /\.(kpp|png)$/i.test(f.name));
+  if (!valid.length) { setStatus('No .kpp files found in selection.', true); return; }
+
+  setStatus(`Processing ${valid.length} file(s)...`);
+  state.brushes = [];
+
+  for (const file of valid) {
+    try {
+      const brush = await processKppFile(file);
+      state.brushes.push({ ...brush, error: null });
+    } catch (err) {
+      state.brushes.push({ sourceFile: file.name, name: file.name, error: err.message });
+    }
+  }
+
+  renderBrushes();
+  const ok = state.brushes.filter(b => !b.error).length;
+  setStatus(`Processed ${ok} of ${valid.length} file(s).`, ok === 0);
+  if (ok > 0) outputSection.classList.remove('hidden');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function renderBrushes() {
+  brushList.innerHTML = '';
+  for (const brush of state.brushes) {
+    const div = document.createElement('div');
+    div.className = 'brush-item';
+    if (brush.error) {
+      div.innerHTML = `
+        <div class="brush-meta">
+          <div class="brush-name">${escapeHtml(brush.sourceFile)}</div>
+          <div class="brush-error">Error: ${escapeHtml(brush.error)}</div>
+        </div>`;
+    } else {
+      div.innerHTML = `
+        <img class="brush-thumb" src="${brush.thumbnail}" alt="">
+        <div class="brush-meta">
+          <div class="brush-name">${escapeHtml(brush.name)}</div>
+          <div class="brush-info">${brush.width}×${brush.height}px · spacing ${brush.spacing}%</div>
+        </div>`;
+    }
+    brushList.appendChild(div);
+  }
+}
+
+function sanitizeFilename(name) {
+  return (name || 'brush').replace(/[^a-z0-9_\- ]/gi, '_').replace(/\s+/g, '_').substring(0, 100) || 'brush';
+}
+
+downloadBtn.addEventListener('click', () => {
+  const valid = state.brushes.filter(b => !b.error);
+  if (!valid.length) return;
   try {
-    const files = builds.map(([name, o]) => ({ name: name + ".abr", data: BB.buildAbr(entries, Object.assign({}, base, o)) }));
-    files.push({ name: "README.txt", data: new TextEncoder().encode("Import each .abr into Adobe Fresco (Brushes > + > Import from files) and note which ones show brushes.\n1 is the recommended build; 2-5 differ in ABR version and how much preset detail is written.\n") });
-    download(BB.zip(files), "fresco-test-files.zip", "application/zip"); status.textContent = `Exported 5 test builds of ${few.length} brush(es).`;
-  } catch (err) { status.textContent = "Error: " + err.message }
-};
+    const blob = buildAbr(valid);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = valid.length === 1
+      ? `${sanitizeFilename(valid[0].name)}.abr`
+      : 'converted-brushes.abr';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setStatus('Download started.');
+  } catch (err) {
+    setStatus('Failed to build ABR: ' + err.message, true);
+  }
+});
