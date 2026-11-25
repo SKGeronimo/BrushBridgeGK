@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 const fileInput = $("#file"), drop = $("#drop"), list = $("#list"), convertBtn = $("#convert"), status = $("#status"),
   spacing = $("#spacing"), spacingLabel = $("#spacingLabel"), outname = $("#outname"), mode = $("#mode"),
-  abrVersion = $("#abrversion"), invert = $("#invert"), usePresetSpacing = $("#presetspacing"), useThumb = $("#usethumb");
+  abrVersion = $("#abrversion"), maxTip = $("#maxtip"), variantsBtn = $("#variants"), invert = $("#invert"), usePresetSpacing = $("#presetspacing"), useThumb = $("#usethumb");
 /* item kinds: "preset" (.kpp), "tip" (.gbr/.png/.svg tip file), each with .tip once decoded */
 let items = [];
 
@@ -16,7 +16,7 @@ drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefau
 drop.addEventListener("drop", e => addFiles(e.dataTransfer.files));
 fileInput.onchange = () => addFiles(fileInput.files);
 spacing.oninput = () => { spacingLabel.textContent = spacing.value + "%" };
-[mode, abrVersion, invert, usePresetSpacing, useThumb].forEach(el => el.onchange = render);
+[mode, abrVersion, maxTip, invert, usePresetSpacing, useThumb].forEach(el => el.onchange = render);
 
 const uid = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : "b" + Date.now().toString(36) + Math.random().toString(36).slice(2);
 const baseName = n => n.replace(/^.*[\\/]/, "");
@@ -130,7 +130,7 @@ function render() {
     row.append(img, info, remove); list.append(row);
   });
   const n = exportable().length, missing = [...new Set(items.filter(b => b.needs).map(b => b.needs))];
-  convertBtn.disabled = n === 0;
+  convertBtn.disabled = n === 0; variantsBtn.disabled = n === 0;
   convertBtn.firstChild.textContent = mode.value === "zip" ? "Convert & download ZIP " : "Convert & download ABR ";
   status.textContent = !items.length ? "Select one or more KPP files to begin." :
     `${n} brush(es) ready to export.` + (missing.length ? ` Missing tip file(s): ${missing.join(", ")} — add them alongside the presets.` : "");
@@ -148,15 +148,27 @@ function download(bytes, filename, type) {
 const safe = s => s.replace(/[\\/:*?"<>|]+/g, "_").trim() || "brush";
 convertBtn.onclick = () => {
   const list_ = exportable(); if (!list_.length) return;
-  const opts = { sub: +abrVersion.value, invert: invert.checked };
+  const [major, sub] = abrVersion.value.split(".").map(Number), opts = { major, sub, full: true, maxTip: +maxTip.value, invert: invert.checked };
   try {
     const base = outname.value.trim().replace(/\.(abr|zip)$/i, "") || "converted-brushes";
     if (mode.value === "zip") {
       const used = new Set(), files = list_.map(b => { const n = safe(b.name); let k = 2, cand = n; while (used.has(cand.toLowerCase())) cand = n + " " + k++; used.add(cand.toLowerCase()); return { name: cand + ".abr", data: BB.buildAbr([entryFor(b)], opts) } });
       download(BB.zip(files), base + ".zip", "application/zip"); status.textContent = `Exported ${files.length} separate ABR file(s) in a ZIP.`;
     } else {
-      download(BB.buildAbr(list_.map(entryFor), opts), base + ".abr", "application/octet-stream"); status.textContent = `Exported ${list_.length} brush(es) into one ABR (Photoshop v6.${opts.sub}).`;
+      download(BB.buildAbr(list_.map(entryFor), opts), base + ".abr", "application/octet-stream"); status.textContent = `Exported ${list_.length} brush(es) into one ABR (Photoshop v${major}.${sub}).`;
     }
   } catch (err) { status.textContent = "Conversion error: " + err.message }
 };
 render();
+
+/* ---- Fresco compatibility test files: same brushes, five different ABR builds ---- */
+variantsBtn.onclick = () => {
+  const few = exportable().slice(0, 3); if (!few.length) return;
+  const base = { maxTip: 512, invert: invert.checked }, entries = few.map(entryFor);
+  const builds = [["1_v10.2_full", { major: 10, sub: 2, full: true }], ["2_v10.2_minimal", { major: 10, sub: 2, full: false }], ["3_v10.1_full", { major: 10, sub: 1, full: true }], ["4_v6.2_full", { major: 6, sub: 2, full: true }], ["5_v6.2_minimal", { major: 6, sub: 2, full: false }]];
+  try {
+    const files = builds.map(([name, o]) => ({ name: name + ".abr", data: BB.buildAbr(entries, Object.assign({}, base, o)) }));
+    files.push({ name: "README.txt", data: new TextEncoder().encode("Import each .abr into Adobe Fresco (Brushes > + > Import from files) and note which ones show brushes.\n1 is the recommended build; 2-5 differ in ABR version and how much preset detail is written.\n") });
+    download(BB.zip(files), "fresco-test-files.zip", "application/zip"); status.textContent = `Exported 5 test builds of ${few.length} brush(es).`;
+  } catch (err) { status.textContent = "Error: " + err.message }
+};

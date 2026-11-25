@@ -47,6 +47,8 @@ MIT — see `LICENSE`.
 
 ## Output format
 
-Writes Photoshop ABR v6.1/v6.2: a `samp` section (RLE-compressed 8-bit tips, 255 = ink) and a `desc` section with one sampled-brush preset per tip, which is what Adobe apps use to list brushes. Tips are read from the GIMP `.gbr` (or PNG/SVG) resources Krita embeds in the preset; Krita's built-in round/square brushes are approximated with a generated tip. If brushes look inverted after importing, tick **Invert tip data**. If 6.2 will not import, try 6.1.
+Writes a modern Photoshop brush library: ABR v10.2 by default (v10.1, v6.2 and v6.1 are selectable), with 8BIM `samp` (RLE-compressed 8-bit tips, 255 = ink), `patt` and `desc` sections, 4-byte aligned. Each tip gets a full sampled-brush preset (spacing, dynamics flags, brush size etc.) like Photoshop writes. Tips are read from the `.gbr` (or PNG/SVG) files Krita stores next to its presets; add them, or the `.bundle`, alongside the `.kpp` files. Krita's built-in round/square brushes are approximated with a generated tip.
+
+Adobe Fresco imports ABR through Creative Cloud and is stricter than Photoshop. If it finds nothing, use **Download Fresco test files** to export five builds of your first brushes and see which one imports. If brushes import inverted, tick **Invert tip data**. Large sets import more reliably in small batches.
 
 `core.js` has no DOM dependencies and can be tested in Node.

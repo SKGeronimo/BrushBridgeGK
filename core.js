@@ -208,24 +208,34 @@ function sampRecord(id, w, h, px, sub) {
   const payload = concat([Uint8Array.of(36), ascii(id), mystery, be32(0), be32(0), be32(h), be32(w), be16(8), Uint8Array.of(1), rle(px, w, h)]);
   return concat([be32(payload.length), payload, new Uint8Array((4 - payload.length % 4) % 4)]);
 }
-const section = (tag, data) => concat([ascii("8BIM"), ascii(tag), be32(data.length), data]);
+const section = (tag, data) => concat([ascii("8BIM"), ascii(tag), be32(data.length), data, new Uint8Array((4 - data.length % 4) % 4)]);
+const iLong = (k, v) => concat([dkey(k), ascii("long"), be32(v)]);
+const iDyn = k => iObjc(k, "brVr", [iLong("bVTy", 0), iLong("fStp", 1), iUnit("jitter", "#Prc", 0), iUnit("Mnm ", "#Prc", 0)]);
 
-/* entries: [{name,width,height,ink,spacing}] — opts: {sub:1|2, invert:boolean} */
+/* entries: [{name,width,height,ink,spacing}]
+ * opts: { major: 10|6, sub: 1|2, full: boolean (write the complete Photoshop preset field set), invert: boolean, maxTip: px } */
 BB.buildAbr = function (entries, opts = {}) {
-  const sub = opts.sub === 1 ? 1 : 2, samples = [], presets = [];
-  for (const e of entries) {
+  const major = opts.major === 6 ? 6 : 10, sub = opts.sub === 1 ? 1 : 2, full = opts.full !== false, samples = [], presets = [];
+  for (let e of entries) {
+    if (opts.maxTip) e = Object.assign({}, e, BB.limitSize(e, opts.maxTip));
     const id = uuid(); let px = e.ink;
     if (opts.invert) { px = new Uint8Array(e.ink.length); for (let i = 0; i < px.length; i++) px[i] = 255 - e.ink[i] }
     samples.push(sampRecord(id, e.width, e.height, px, sub));
     const sp = Math.max(1, Math.min(999, Math.round(e.spacing || 25)));
-    presets.push(concat([ascii("Objc"), descBody("Brsh", [
-      iText("Nm  ", e.name),
-      iObjc("Brsh", "sampledBrush", [iUnit("Dmtr", "#Pxl", Math.max(e.width, e.height)), iUnit("Angl", "#Ang", 0), iUnit("Rndn", "#Prc", 100), iUnit("Spcn", "#Prc", sp), iBool("Intr", true), iBool("flipX", false), iBool("flipY", false), iText("sampledData", id)])
-    ])]));
+    const shape = iObjc("Brsh", "sampledBrush", [iUnit("Dmtr", "#Pxl", Math.max(e.width, e.height)), iText("Nm  ", e.name), iUnit("Spcn", "#Prc", sp), iBool("Intr", true), iUnit("Rndn", "#Prc", 100), iUnit("Angl", "#Ang", 0), iBool("flipY", false), iBool("flipX", false), iText("sampledData", id)]);
+    const items = [iText("Nm  ", e.name), shape];
+    if (full) items.push(
+      iBool("useTipDynamics", false), iBool("flipX", false), iBool("flipY", false), iBool("brushProjection", false),
+      iUnit("minimumDiameter", "#Prc", 0), iUnit("minimumRoundness", "#Prc", 100), iUnit("tiltScale", "#Prc", 100),
+      iDyn("szVr"), iDyn("angleDynamics"), iDyn("roundnessDynamics"),
+      iBool("useScatter", false), iUnit("Spcn", "#Prc", sp),
+      iBool("useTexture", false), iBool("usePaintDynamics", false), iBool("useColorDynamics", false), iBool("useBrushPose", false),
+      iBool("Wtdg", false), iBool("Nose", false), iBool("Rpt ", false), iBool("useBrushSize", true), iBool("interpretation", false));
+    presets.push(concat([ascii("Objc"), descBody("Brsh", items)]));
   }
   const list = concat([dkey("Brsh"), ascii("VlLs"), be32(presets.length), ...presets]);
   const desc = concat([be32(16), descBody("null", [list])]);
-  return concat([be16(6), be16(sub), section("samp", concat(samples)), section("patt", new Uint8Array(0)), section("desc", desc)]);
+  return concat([be16(major), be16(sub), section("samp", concat(samples)), section("patt", new Uint8Array(0)), section("desc", desc)]);
 };
 
 /* ---------- minimal ZIP (store only) so many brushes can be saved as separate .abr files ---------- */

@@ -17,7 +17,8 @@
 <div class="options">
 <label>Output<select id="mode"><option value="single">One ABR with all brushes</option><option value="zip">Separate ABR per brush (ZIP)</option></select></label>
 <label>Output file name<input id="outname" value="converted-brushes"></label>
-<label>ABR format<select id="abrversion"><option value="2">Photoshop v6.2 (recommended)</option><option value="1">Photoshop v6.1 (try if 6.2 won't import)</option></select></label>
+<label>ABR format<select id="abrversion"><option value="10.2">Photoshop v10.2 – modern (recommended)</option><option value="10.1">Photoshop v10.1</option><option value="6.2">Photoshop v6.2</option><option value="6.1">Photoshop v6.1</option></select></label>
+<label>Max tip size<select id="maxtip"><option value="2500">2500 px</option><option value="1024" selected>1024 px (recommended)</option><option value="512">512 px</option></select></label>
 <label>Fallback spacing <span id="spacingLabel">25%</span><input id="spacing" type="range" min="1" max="100" value="25"></label>
 <label class="check"><input id="presetspacing" type="checkbox" checked> Use each preset's own spacing when available</label>
 <label class="check"><input id="invert" type="checkbox"> Invert tip data (only if brushes import as inverted blobs)</label>
@@ -25,8 +26,9 @@
 </div>
 <div id="list" class="brushlist"></div>
 <div class="bottom"><div id="status" class="status">Select one or more KPP files to begin.</div><button id="convert" class="btn primary" disabled>Convert & download ABR <span>↓</span></button></div>
+<div class="bottom"><div class="status">Fresco rejects the file? Export five differently-built test files of your first brush and see which one imports.</div><button id="variants" class="btn" disabled>Download Fresco test files (ZIP)</button></div>
 </section>
-<section class="note"><strong>Experimental format support</strong><p>KPP presets may use complex brush engines, dynamics, textures, and resources. This tool currently targets bitmap tips only, and Krita usually stores a preset’s tip in a separate .gbr file, so add those too (or the .bundle the brushes came from). Textures, dynamics and masking brushes are not converted. If a tip cannot be extracted it is flagged in the list, and you can opt in to using the preset thumbnail instead. The ABR output is Photoshop v6 (tips plus brush presets). Krita’s built-in round and square brushes have no bitmap, so they are approximated with a generated tip.</p></section>
+<section class="note"><strong>Experimental format support</strong><p>KPP presets may use complex brush engines, dynamics, textures, and resources. This tool currently targets bitmap tips only, and Krita usually stores a preset’s tip in a separate .gbr file, so add those too (or the .bundle the brushes came from). Textures, dynamics and masking brushes are not converted. If a tip cannot be extracted it is flagged in the list, and you can opt in to using the preset thumbnail instead. The ABR output is a modern Photoshop brush library (tips plus brush presets). Krita’s built-in round and square brushes have no bitmap, so they are approximated with a generated tip.</p></section>
 <section class="how"><h2>How it works</h2><div class="steps"><article><div>01</div><h3>Drop presets</h3><p>Choose KPP files directly from your device.</p></article><article><div>02</div><h3>Extract tips</h3><p>Look for embedded bitmap resources and report fallbacks.</p></article><article><div>03</div><h3>Export ABR</h3><p>Package the tips and presets into a Photoshop-style ABR (or one ABR per brush).</p></article></div></section>
 <footer><span>BrushBridge · Free and open source</span><span>Processing happens locally · No uploads</span></footer>
 </main></div><script src="core.js"></script><script src="app.js"></script>
