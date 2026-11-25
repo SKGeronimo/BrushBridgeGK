@@ -31,40 +31,48 @@ function stripBom(s) {
   return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
 }
 
+function textFromChunk(chunk) {
+  if (chunk.type === 'tEXt') {
+    const n = chunk.data.indexOf(0);
+    if (n < 0) return null;
+    return new TextDecoder().decode(chunk.data.slice(n + 1));
+  }
+  if (chunk.type === 'zTXt') {
+    const n = chunk.data.indexOf(0);
+    if (n < 0) return null;
+    return new TextDecoder().decode(pako.inflate(chunk.data.slice(n + 2)));
+  }
+  if (chunk.type === 'iTXt') {
+    const n = chunk.data.indexOf(0);
+    if (n < 0) return null;
+    const flag = chunk.data[n + 1];
+    let pos = n + 3;
+    const langEnd = chunk.data.indexOf(0, pos);
+    if (langEnd < 0) return null;
+    pos = langEnd + 1;
+    const transEnd = chunk.data.indexOf(0, pos);
+    if (transEnd < 0) return null;
+    pos = transEnd + 1;
+    const body = chunk.data.slice(pos);
+    return new TextDecoder().decode(flag === 1 ? pako.inflate(body) : body);
+  }
+  return null;
+}
+
+function looksLikeXml(s) {
+  if (!s) return false;
+  return s.includes('<?xml') || s.includes('<Preset') || s.includes('<preset') || s.includes('<param');
+}
+
 function extractXml(chunks) {
   for (const chunk of chunks) {
+    if (!['tEXt', 'zTXt', 'iTXt'].includes(chunk.type)) continue;
     try {
-      if (chunk.type === 'tEXt') {
-        const n = chunk.data.indexOf(0);
-        if (n < 0) continue;
-        const text = new TextDecoder().decode(chunk.data.slice(n + 1));
-        if (text.includes('preset') || text.includes('<param')) return stripBom(text);
-      } else if (chunk.type === 'zTXt') {
-        const n = chunk.data.indexOf(0);
-        if (n < 0) continue;
-        const inflated = pako.inflate(chunk.data.slice(n + 2));
-        const text = new TextDecoder().decode(inflated);
-        if (text.includes('preset') || text.includes('<param')) return stripBom(text);
-      } else if (chunk.type === 'iTXt') {
-        const n = chunk.data.indexOf(0);
-        if (n < 0) continue;
-        const flag = chunk.data[n + 1];
-        let pos = n + 3;
-        const langEnd = chunk.data.indexOf(0, pos);
-        if (langEnd < 0) continue;
-        pos = langEnd + 1;
-        const transEnd = chunk.data.indexOf(0, pos);
-        if (transEnd < 0) continue;
-        pos = transEnd + 1;
-        let text;
-        if (flag === 1) {
-          text = new TextDecoder().decode(pako.inflate(chunk.data.slice(pos)));
-        } else {
-          text = new TextDecoder().decode(chunk.data.slice(pos));
-        }
-        if (text.includes('preset') || text.includes('<param')) return stripBom(text);
-      }
-    } catch (e) { /* skip bad chunk */ }
+      const text = textFromChunk(chunk);
+      if (text && looksLikeXml(text)) return stripBom(text);
+    } catch (e) {
+      console.warn(`Failed to decode ${chunk.type} chunk:`, e);
+    }
   }
   return null;
 }
@@ -83,7 +91,12 @@ function parseXmlSettings(xmlString) {
   });
 
   const pick = (...keys) => {
-    for (const k of keys) if (params[k] != null && !isNaN(parseFloat(params[k]))) return parseFloat(params[k]);
+    for (const k of keys) {
+      if (params[k] != null) {
+        const v = parseFloat(params[k]);
+        if (!isNaN(v)) return v;
+      }
+    }
     return null;
   };
 
@@ -101,7 +114,7 @@ async function loadPngAsImage(buffer) {
   const img = new Image();
   await new Promise((resolve, reject) => {
     img.onload = resolve;
-    img.onerror = () => reject(new Error('Failed to decode PNG'));
+    img.onerror = () => reject(new Error('Failed to decode PNG image'));
     img.src = url;
   });
   return img;
@@ -135,7 +148,7 @@ function imageToTipData(img) {
       tip[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
     }
   }
-  return { tip, width, height };
+  return { tip, width, height, useAlpha };
 }
 
 function padToSquare(tip, width, height) {
@@ -175,32 +188,47 @@ function makeThumbnail(img) {
 }
 
 async function processKppFile(file) {
+  const debug = [];
+  debug.push(`File: ${file.name} (${file.size} bytes)`);
+
   const buffer = await file.arrayBuffer();
   const chunks = parsePngChunks(buffer);
+  debug.push(`PNG valid. Chunks: ${chunks.map(c => `${c.type}(${c.data.length})`).join(', ')}`);
+
   const xml = extractXml(chunks);
+  if (xml) debug.push(`XML found (${xml.length} chars)`);
+  else debug.push('No XML metadata found — using defaults');
 
   let settings = { name: file.name.replace(/\.kpp$/i, ''), size: null, spacing: null };
   if (xml) {
     try {
       const parsed = parseXmlSettings(xml);
+      debug.push(`Parsed settings: ${JSON.stringify(parsed)}`);
       if (parsed.name) settings.name = parsed.name;
       if (parsed.size != null) settings.size = parsed.size;
       if (parsed.spacing != null) settings.spacing = parsed.spacing;
-    } catch (e) { console.warn('XML parse failed:', e); }
+    } catch (e) {
+      debug.push(`XML parse failed: ${e.message}`);
+    }
   }
 
   const img = await loadPngAsImage(buffer);
-  const { tip, width, height } = imageToTipData(img);
+  debug.push(`Image: ${img.naturalWidth}×${img.naturalHeight}`);
+
+  const { tip, width, height, useAlpha } = imageToTipData(img);
+  debug.push(`Tip source: ${useAlpha ? 'alpha channel' : 'luminance'}`);
   const square = padToSquare(tip, width, height);
   const { tip: finalTip, size: finalSize } = downsample(square.tip, square.size, 2500);
+  debug.push(`Final tip: ${finalSize}×${finalSize} (${finalTip.length} bytes)`);
 
   let spacingPct = 25;
-  if (settings.spacing != null && !isNaN(settings.spacing)) {
+  if (settings.spacing != null) {
     spacingPct = settings.spacing < 10
       ? Math.round(settings.spacing * 100)
       : Math.round(settings.spacing);
   }
   spacingPct = Math.max(1, Math.min(1000, spacingPct));
+  debug.push(`Spacing: ${spacingPct}%`);
 
   return {
     name: settings.name || file.name.replace(/\.kpp$/i, ''),
@@ -210,31 +238,44 @@ async function processKppFile(file) {
     spacing: spacingPct,
     thumbnail: makeThumbnail(img),
     sourceFile: file.name,
+    debug: debug.join('\n'),
   };
 }
 
-// ---------- ABR writer (v2, sampled brush) ----------
+// ---------- ABR writer (v2, subversion 1, sampled brush) ----------
+// Note on the format:
+//   Header: uint16 version (2), uint16 subversion (1), uint32 count
+//   Per sampled brush (all big-endian):
+//     uint32 type (2 = sampled)
+//     uint32 size (brush diameter)
+//     uint32 spacing (percent)
+//     Pascal string name (1-byte length + chars, padded to 4-byte boundary)
+//     uint32 antialiasing
+//     int32 bounds top, int32 bounds left, int32 bounds bottom, int32 bounds right
+//     uint16 depth (bits per pixel, 8)
+//     uint16 compression (0 = raw)
+//     width*height bytes of tip data
 
 function buildAbr(brushes) {
   const encoder = new TextEncoder();
 
-  const prepared = brushes.map((brush) => {
+  const prepared = brushes.map(brush => {
     const clean = (brush.name || 'Brush').replace(/[\x00-\x1F\x7F]/g, '').substring(0, 255);
-    const bytes = encoder.encode(clean);
-    const len = bytes.length;
-    const pad = (4 - ((len + 1) % 4)) % 4;
-    return { brush, nameBytes: bytes, nameLen: len, namePad: pad };
+    const nameBytes = encoder.encode(clean);
+    const nameLen = nameBytes.length;
+    const nameTotal = 1 + nameLen;                  // length byte + chars
+    const namePadded = Math.ceil(nameTotal / 4) * 4;
+    return { brush, nameBytes, nameLen, namePadded };
   });
 
-  let total = 2 + 2 + 4;
+  let total = 2 + 2 + 4; // header
   for (const p of prepared) {
-    total += 4 + 4 + 4;                  // type, size, spacing
-    total += 1 + p.nameLen + p.namePad;  // pascal name
-    total += 4;                          // antialiasing
-    total += 4 + 4 + 4 + 4;              // top, left, bottom, right
-    total += 4;                          // depth (bits per pixel)
-    total += 1;                          // compression
-    total += p.brush.tipData.length;     // tip bytes
+    total += 4 + 4 + 4;                            // type, size, spacing
+    total += p.namePadded;                         // pascal name (padded)
+    total += 4;                                    // antialiasing
+    total += 4 + 4 + 4 + 4;                        // bounds
+    total += 2 + 2;                                // depth, compression
+    total += p.brush.tipData.length;
   }
 
   const buffer = new ArrayBuffer(total);
@@ -242,33 +283,38 @@ function buildAbr(brushes) {
   const bytes = new Uint8Array(buffer);
   let o = 0;
 
-  view.setUint16(o, 2, false); o += 2;           // version
-  view.setUint16(o, 2, false); o += 2;           // subversion
+  view.setUint16(o, 2, false); o += 2;             // version
+  view.setUint16(o, 1, false); o += 2;             // subversion
   view.setUint32(o, prepared.length, false); o += 4;
 
   for (const p of prepared) {
     const b = p.brush;
-    view.setUint32(o, 2, false); o += 4;         // sampled brush
-    view.setUint32(o, b.width, false); o += 4;   // size
-    view.setUint32(o, b.spacing, false); o += 4; // spacing (percent)
 
+    view.setUint32(o, 2, false); o += 4;           // sampled brush
+    view.setUint32(o, b.width, false); o += 4;     // size
+    view.setUint32(o, b.spacing, false); o += 4;   // spacing
+
+    // Pascal name
     view.setUint8(o, p.nameLen); o += 1;
     bytes.set(p.nameBytes, o); o += p.nameLen;
-    o += p.namePad;
+    o += p.namePadded - (1 + p.nameLen);           // padding to 4-byte boundary
 
-    view.setUint32(o, 1, false); o += 4;         // antialiasing
+    view.setUint32(o, 1, false); o += 4;           // antialiasing
 
-    view.setInt32(o, 0, false); o += 4;          // top
-    view.setInt32(o, 0, false); o += 4;          // left
-    view.setInt32(o, b.height, false); o += 4;   // bottom (exclusive)
-    view.setInt32(o, b.width, false); o += 4;    // right  (exclusive)
+    view.setInt32(o, 0, false); o += 4;            // top
+    view.setInt32(o, 0, false); o += 4;            // left
+    view.setInt32(o, b.height, false); o += 4;     // bottom
+    view.setInt32(o, b.width, false); o += 4;      // right
 
-    view.setUint32(o, 8, false); o += 4;         // depth = 8 bits/pixel
-    view.setUint8(o, 0); o += 1;                 // compression = raw
+    view.setUint16(o, 8, false); o += 2;           // depth = 8 bpp
+    view.setUint16(o, 0, false); o += 2;           // compression = raw
 
     bytes.set(b.tipData, o); o += b.tipData.length;
   }
 
+  if (o !== total) {
+    console.error(`ABR size mismatch: wrote ${o}, expected ${total}`);
+  }
   return new Blob([buffer], { type: 'application/octet-stream' });
 }
 
@@ -305,24 +351,28 @@ fileInput.addEventListener('change', async e => {
 
 async function handleFiles(files) {
   const valid = files.filter(f => /\.(kpp|png)$/i.test(f.name));
-  if (!valid.length) { setStatus('No .kpp files found in selection.', true); return; }
+  if (!valid.length) { setStatus('No .kpp files in selection.', true); return; }
 
   setStatus(`Processing ${valid.length} file(s)...`);
   state.brushes = [];
 
   for (const file of valid) {
     try {
+      console.log(`[KPP→ABR] Processing ${file.name}`);
       const brush = await processKppFile(file);
+      console.log(`[KPP→ABR] Brush extracted:`, brush);
       state.brushes.push({ ...brush, error: null });
     } catch (err) {
+      console.error(`[KPP→ABR] Failed on ${file.name}:`, err);
       state.brushes.push({ sourceFile: file.name, name: file.name, error: err.message });
     }
   }
 
   renderBrushes();
+  outputSection.classList.remove('hidden');
+
   const ok = state.brushes.filter(b => !b.error).length;
   setStatus(`Processed ${ok} of ${valid.length} file(s).`, ok === 0);
-  if (ok > 0) outputSection.classList.remove('hidden');
 }
 
 function escapeHtml(s) {
@@ -348,6 +398,10 @@ function renderBrushes() {
         <div class="brush-meta">
           <div class="brush-name">${escapeHtml(brush.name)}</div>
           <div class="brush-info">${brush.width}×${brush.height}px · spacing ${brush.spacing}%</div>
+          <details style="margin-top:.35rem;font-size:.8rem;">
+            <summary style="cursor:pointer;color:#4a7cff;">Debug info</summary>
+            <pre style="white-space:pre-wrap;background:#f5f5f5;padding:.5rem;border-radius:4px;font-size:.75rem;margin:.35rem 0 0;">${escapeHtml(brush.debug || '')}</pre>
+          </details>
         </div>`;
     }
     brushList.appendChild(div);
@@ -360,9 +414,10 @@ function sanitizeFilename(name) {
 
 downloadBtn.addEventListener('click', () => {
   const valid = state.brushes.filter(b => !b.error);
-  if (!valid.length) return;
+  if (!valid.length) { setStatus('No brushes to download.', true); return; }
   try {
     const blob = buildAbr(valid);
+    console.log(`[KPP→ABR] Built ABR: ${blob.size} bytes for ${valid.length} brush(es)`);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -373,8 +428,9 @@ downloadBtn.addEventListener('click', () => {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setStatus('Download started.');
+    setStatus(`Download started (${blob.size} bytes).`);
   } catch (err) {
+    console.error('[KPP→ABR] ABR build failed:', err);
     setStatus('Failed to build ABR: ' + err.message, true);
   }
 });
